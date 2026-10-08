@@ -4,9 +4,13 @@ Ei vaadi API-avainta eikä Google Cloudia.
 
 Käyttö (projektin juuresta, venv aktiivisena, tarvitsee vain 'requests'):
     python 01_fetch_prh.py                     # oletushaut, vertailu
-    python 01_fetch_prh.py --forms OY OYJ      # vain osakeyhtiöt (isommat toimistot)
-    python 01_fetch_prh.py --line 69202 --name tilitoimisto --location Helsinki
+    python 01_fetch_prh.py --forms 16          # vain osakeyhtiöt (koodi 16; myös --forms osakeyhtiö)
+    python 01_fetch_prh.py --only-lines 69201  # vain tämän toimialakoodin rivit
+    python 01_fetch_prh.py --line 69201 --name tilitoimisto --location Helsinki
     python 01_fetch_prh.py --all               # mukaan myös lopettaneet
+
+Toimialakoodit: esimerkkivastauksessa 69202 = tilintarkastus (Auditing). Kirjanpito/tilitoimistot
+ovat todennäköisesti 69201, mutta varmista koodi ajon yhteenvedon "Toimialat"-listasta.
 
 Rajapinta (skeema: https://avoindata.prh.fi/opendata-ytj-api/v3/schema?lang=en):
   - hakuparametrit: name, location, mainBusinessLine (TOL-koodi tai teksti), companyForm,
@@ -33,7 +37,7 @@ BASE = "https://avoindata.prh.fi/opendata-ytj-api/v3/companies"
 PAGE_SIZE = 100
 MAX_PAGES = 60  # suoja: 6000 yritystä per haku
 
-DEFAULT_LINES = ["69202", "kirjanpito"]
+DEFAULT_LINES = ["69201", "kirjanpito"]
 DEFAULT_NAMES = ["tilitoimisto", "kirjanpito"]
 
 
@@ -91,7 +95,15 @@ def pick_address(c):
     offices = addr.get("postOffices") or []
     office = next((o for o in offices if str(o.get("languageCode")) == "1"), None) \
         or (offices[0] if offices else {})
-    street = (addr.get("street") or addr.get("freeAddressLine") or "").replace("_", " ").strip()
+    street = (addr.get("street") or "").strip()
+    if street:
+        # PRH palauttaa talonnumeron, rapun ja huoneiston erillisinä kenttinä
+        number = (addr.get("buildingNumber") or "").strip()
+        entrance = (addr.get("entrance") or "").strip()
+        apt = ((addr.get("apartmentNumber") or "") + (addr.get("apartmentIdSuffix") or "")).strip()
+        street = " ".join(p for p in (street, number, entrance, apt) if p)
+    else:
+        street = (addr.get("freeAddressLine") or "").replace("_", " ").strip()
     return street, addr.get("postCode") or "", office.get("city") or ""
 
 
@@ -118,7 +130,8 @@ def to_row(c, found_by):
     return {
         "y_tunnus": (c.get("businessId") or {}).get("value", ""),
         "nimi": current_name(c),
-        "yhtiomuoto": form.get("type", ""),
+        "yhtiomuoto_koodi": form.get("type", ""),
+        "yhtiomuoto": desc(form.get("descriptions")),
         "toimiala_koodi": line.get("type", ""),
         "toimiala": desc(line.get("descriptions")),
         "puhelin": phone,
@@ -138,7 +151,10 @@ def main():
     ap.add_argument("--location", default="Helsinki", help="kotipaikka (oletus Helsinki)")
     ap.add_argument("--line", nargs="*", help="toimiala (TOL-koodi tai teksti), esim. 69202 kirjanpito")
     ap.add_argument("--name", nargs="*", help="nimihaku, esim. tilitoimisto kirjanpito")
-    ap.add_argument("--forms", nargs="*", help="rajaa yhtiömuotoihin, esim. OY OYJ KY")
+    ap.add_argument("--forms", nargs="*",
+                    help="rajaa yhtiömuotoon koodilla tai nimellä, esim. 16 tai osakeyhtiö")
+    ap.add_argument("--only-lines", nargs="*",
+                    help="säilytä vain rivit, joiden toimialakoodi alkaa näillä, esim. 69201")
     ap.add_argument("--all", action="store_true", help="sisällytä myös lopettaneet")
     ap.add_argument("--out", default="data/prh_pohja.csv")
     args = ap.parse_args()
@@ -159,7 +175,8 @@ def main():
             print(f"  Virhe: {e}")
             continue
         active = sum(1 for c in companies if is_active(c))
-        print(f"  tuloksia {total}, haettu {len(companies)}, aktiivisia {active}")
+        note = "  (PRH:n kokonaisluku on suurempi kuin haettujen määrä)" if len(companies) < total else ""
+        print(f"  tuloksia {total}, haettu {len(companies)}, aktiivisia {active}{note}")
         if companies and not first_raw_saved:
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
             sample = Path(args.out).with_name("prh_esimerkkivastaus.json")
@@ -180,8 +197,13 @@ def main():
     if not args.all:
         rows = [r for r in rows if r["aktiivinen"] == "kyllä"]
     if args.forms:
-        wanted = {f.upper() for f in args.forms}
-        rows = [r for r in rows if r["yhtiomuoto"].upper() in wanted]
+        # Vastaa joko koodia (16) tai nimen osaa (osakeyhtiö)
+        wanted = [f.lower() for f in args.forms]
+        rows = [r for r in rows
+                if r["yhtiomuoto_koodi"].lower() in wanted
+                or any(w in r["yhtiomuoto"].lower() for w in wanted if not w.isdigit())]
+    if args.only_lines:
+        rows = [r for r in rows if any(r["toimiala_koodi"].startswith(p) for p in args.only_lines)]
     rows.sort(key=lambda r: r["nimi"].lower())
 
     out = Path(args.out)
@@ -195,7 +217,11 @@ def main():
     print("\n=== Yhteenveto ===")
     print(f"Uniikkeja yrityksiä yhteensä: {total_unique}")
     print(f"Tallennettu: {len(rows)} riviä -> {out}")
-    print("Yhtiömuodot:", dict(Counter(r["yhtiomuoto"] or "?" for r in rows).most_common(8)))
+    print("Yhtiömuodot:", dict(Counter(
+        f"{r['yhtiomuoto_koodi']} {r['yhtiomuoto']}".strip() or "?" for r in rows).most_common(8)))
+    print("Toimialat (tallennetuissa riveissä):")
+    for (code, name), n in Counter((r["toimiala_koodi"], r["toimiala"]) for r in rows).most_common(10):
+        print(f"  {n:4d}  {code} {name}")
     print("Rekisterin tila:", dict(Counter(r["tila"] or "?" for r in rows).most_common(5)))
     print(f"Verkkosivu: {sum(1 for r in rows if r['verkkosivu'])}, "
           f"puhelin: {sum(1 for r in rows if r['puhelin'])}")
