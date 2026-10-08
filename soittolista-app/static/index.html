@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soittolista</title>
+<style>
+:root {
+  --bg:#f4f5f8; --card:#fff; --text:#1d2433; --muted:#6b7385; --line:#e2e5ec;
+  --accent:#1f3a5f; --accent-text:#fff; --link:#0563c1;
+  --a:#c6efce; --a-text:#14532d; --b:#ffeb9c; --b-text:#6b4e00; --c:#ececec; --c-text:#444;
+  --green:#1e8e3e; --yellow:#b7791f; --red:#c0392b; --input:#fff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#13161c; --card:#1c212a; --text:#e8ebf0; --muted:#8d95a6; --line:#2b3340;
+    --accent:#7fa6d9; --accent-text:#0e1520; --link:#7fb3ff; --input:#141922;
+    --a:#1d4d2b; --a-text:#bff0cb; --b:#5a4a14; --b-text:#ffe9a3; --c:#2b3340; --c-text:#b5bccb;
+    --green:#4cc275; --yellow:#e0a93a; --red:#f0705f;
+  }
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text);
+  font:15px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif; }
+header { background:var(--card); border-bottom:1px solid var(--line); padding:10px 20px;
+  display:flex; flex-wrap:wrap; gap:14px 24px; align-items:center; position:sticky; top:0; z-index:5; }
+h1 { font-size:18px; margin:0; letter-spacing:.2px; }
+nav { display:flex; gap:4px; }
+nav button { background:none; border:0; padding:8px 14px; border-radius:8px; color:var(--muted);
+  font:inherit; font-weight:600; cursor:pointer; }
+nav button.active { background:var(--accent); color:var(--accent-text); }
+.filters { display:flex; gap:8px; align-items:center; margin-left:auto; }
+select, input, textarea { background:var(--input); color:var(--text); border:1px solid var(--line);
+  border-radius:8px; padding:7px 10px; font:inherit; }
+textarea { width:100%; resize:vertical; }
+.statsbar { width:100%; color:var(--muted); font-size:13px; display:flex; gap:18px; flex-wrap:wrap; }
+.statsbar b { color:var(--text); }
+main { max-width:1100px; margin:20px auto; padding:0 20px 60px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px; }
+.grid { display:grid; grid-template-columns: 1fr 320px; gap:18px; align-items:start; }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+.badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+.prio-A { background:var(--a); color:var(--a-text); }
+.prio-B { background:var(--b); color:var(--b-text); }
+.prio-C { background:var(--c); color:var(--c-text); }
+.tag { background:var(--c); color:var(--c-text); border-radius:6px; padding:2px 8px; font-size:12px; margin-left:6px; }
+.company-name { font-size:26px; font-weight:700; margin:10px 0 2px; }
+.muted { color:var(--muted); }
+.phone { display:inline-block; font-size:34px; font-weight:800; margin:14px 0 6px; color:var(--text);
+  text-decoration:none; letter-spacing:.5px; }
+.phone:hover { color:var(--link); }
+.row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:8px 0; }
+a { color:var(--link); }
+button.btn { border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:10px;
+  padding:9px 14px; font:inherit; font-weight:600; cursor:pointer; }
+button.btn:hover { border-color:var(--accent); }
+button.btn kbd { opacity:.55; font-size:11px; margin-left:6px; font-family:inherit; }
+button.btn.sel { background:var(--accent); color:var(--accent-text); border-color:var(--accent); }
+button.out-green { border-color:var(--green); color:var(--green); }
+button.out-yellow { border-color:var(--yellow); color:var(--yellow); }
+button.out-red { border-color:var(--red); color:var(--red); }
+.label { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.6px;
+  color:var(--muted); margin:18px 0 6px; }
+.history { max-height:520px; overflow:auto; }
+.hist-item { padding:9px 0; border-bottom:1px solid var(--line); font-size:14px; }
+.hist-item:last-child { border-bottom:0; }
+table { width:100%; border-collapse:collapse; }
+th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); }
+th { font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); }
+tbody tr { cursor:pointer; }
+tbody tr:hover { background:var(--bg); }
+.st { font-size:13px; font-weight:600; }
+.st-Kiinnostunut { color:var(--green); }
+.st-Soita { color:var(--yellow); }
+.st-Ei-kiinnostunut, .st-Väärä, .st-Ei-markkinointisoittoja { color:var(--red); }
+.toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--accent);
+  color:var(--accent-text); padding:10px 18px; border-radius:10px; font-weight:600; opacity:0;
+  transition:opacity .2s; pointer-events:none; }
+.toast.show { opacity:1; }
+.empty { text-align:center; padding:50px 10px; }
+.hidden { display:none; }
+.flex-between { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📞 Soittolista</h1>
+  <nav>
+    <button data-action="tab" data-tab="call" class="active">Soita</button>
+    <button data-action="tab" data-tab="table">Yritykset</button>
+    <button data-action="tab" data-tab="import">Listat ja vienti</button>
+  </nav>
+  <div class="filters">
+    <select id="listSel" title="Lista"></select>
+    <select id="prioSel" title="Prioriteetti">
+      <option value="">Kaikki prio</option>
+      <option value="A">Vain A</option>
+      <option value="A,B">A + B</option>
+    </select>
+  </div>
+  <div class="statsbar" id="stats"></div>
+</header>
+
+<main>
+  <section id="view-call"></section>
+
+  <section id="view-table" class="hidden">
+    <div class="card">
+      <div class="row">
+        <input id="q" placeholder="Hae nimellä, numerolla, muistiinpanolla…" style="flex:1;min-width:220px">
+        <select id="fPrio"><option value="">Prio</option><option>A</option><option>B</option><option>C</option></select>
+        <select id="fStatus"></select>
+        <select id="fSize">
+          <option value="">Koko</option><option value="unset">Ei arvioitu</option>
+          <option>1-2</option><option>3-9</option><option>10+</option>
+        </select>
+      </div>
+      <div class="muted" id="tableInfo" style="margin:6px 2px 10px"></div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Prio</th><th>Yritys</th><th>Puhelin</th><th>Koko</th><th>Tila</th><th>Seur. soitto</th><th>Arv.</th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-import" class="hidden">
+    <div class="card">
+      <h2 style="margin-top:0">Tuo CSV</h2>
+      <p class="muted">Hyväksyy sekä <code>soittolista.csv</code>:n (03_clean_leads.py) että Apifyn raakaviennin.
+        Jo olemassa olevat yritykset tunnistetaan (paikan tunniste, puhelin, verkkosivu), ja niiden merkintöjä ei ylikirjoiteta.</p>
+      <div class="row">
+        <input type="file" id="file" accept=".csv,text/csv">
+        <input id="listName" placeholder="Listan nimi (valinnainen)">
+        <button class="btn sel" data-action="import">Tuo</button>
+      </div>
+      <div id="importResult" style="margin-top:8px"></div>
+    </div>
+    <div class="card" style="margin-top:18px">
+      <div class="flex-between">
+        <h2 style="margin:0">Listat</h2>
+        <a class="btn" style="text-decoration:none" href="/api/export.csv" download>⬇ Vie kaikki CSV:nä</a>
+      </div>
+      <table style="margin-top:10px">
+        <thead><tr><th>Lista</th><th>Tuotu</th><th>Yrityksiä</th></tr></thead>
+        <tbody id="listsBody"></tbody>
+      </table>
+      <p class="muted" style="margin-bottom:0">Tietokanta on tiedostossa <code>data/soittolista.db</code>. Päivittäiset varmuuskopiot tallentuvat kansioon <code>data/backups/</code>.</p>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const STATUSES = ["Ei soitettu","Ei vastaa","Soita uudelleen","Kiinnostunut","Ei kiinnostunut","Väärä numero","Ei markkinointisoittoja"];
+const OUTCOMES = [
+  ["Ei vastaa","1",""], ["Soita uudelleen","2","out-yellow"], ["Kiinnostunut","3","out-green"],
+  ["Ei kiinnostunut","4","out-red"], ["Väärä numero","5",""], ["Ei markkinointisoittoja","6","out-red"],
+];
+const state = { tab:"call", listId:"", prio:"", skip:[], current:null, queue:0 };
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const addDays = n => new Date(Date.now() + n*864e5).toLocaleDateString("sv-SE");
+const fmtDT = s => s ? s.replace("T"," ").slice(0,16) : "";
+const fmtD = s => s ? s.split("-").reverse().join(".") : "";
+const stClass = s => "st st-" + String(s).split(" ").slice(0,2).join("-").replace(/-$/,"");
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 1600);
+}
+function url(u) { return /^https?:\/\//i.test(u) ? u : "http://" + u; }
+const telHref = p => "tel:" + String(p).replace(/[^\d+]/g, "");
+
+/* ---------- yläpalkki ---------- */
+async function loadLists() {
+  const lists = await api("/api/lists");
+  const sel = $("#listSel");
+  sel.innerHTML = '<option value="">Kaikki listat</option>' +
+    lists.map(l => `<option value="${l.id}">${esc(l.name)} (${l.companies})</option>`).join("");
+  sel.value = state.listId;
+  $("#listsBody").innerHTML = lists.map(l =>
+    `<tr style="cursor:default"><td>${esc(l.name)}</td><td>${esc(fmtDT(l.imported_at))}</td><td>${l.companies}</td></tr>`
+  ).join("") || '<tr><td colspan="3" class="muted">Ei vielä listoja.</td></tr>';
+}
+async function loadStats() {
+  const p = new URLSearchParams();
+  if (state.listId) p.set("list_id", state.listId);
+  if (state.prio) p.set("prio", state.prio);
+  const s = await api("/api/stats?" + p);
+  state.queue = s.queue;
+  const bs = s.by_status;
+  $("#stats").innerHTML =
+    `<span>Jonossa: <b>${s.queue}</b></span><span>Soitettu tänään: <b>${s.called_today}</b></span>` +
+    `<span>Kiinnostuneita: <b>${bs["Kiinnostunut"] || 0}</b></span>` +
+    `<span>Takaisinsoittoja: <b>${bs["Soita uudelleen"] || 0}</b></span><span>Yrityksiä: <b>${s.total}</b></span>`;
+}
+
+/* ---------- soittonäkymä ---------- */
+async function loadNext() {
+  const p = new URLSearchParams();
+  if (state.listId) p.set("list_id", state.listId);
+  if (state.prio) p.set("prio", state.prio);
+  if (state.skip.length) p.set("skip", state.skip.join(","));
+  const r = await api("/api/next?" + p);
+  state.current = r.company;
+  renderCall();
+}
+function renderCall() {
+  const el = $("#view-call"), c = state.current;
+  if (!c) {
+    el.innerHTML = `<div class="card empty"><h2>Jono on tyhjä 🎉</h2>
+      <p class="muted">Ei soitettavia yrityksiä valituilla rajauksilla.</p>
+      ${state.skip.length ? '<button class="btn" data-action="unskip">Näytä ohitetut uudelleen</button>' : ""}</div>`;
+    return;
+  }
+  const site = c.website ? `<a href="${esc(url(c.website))}" target="_blank" rel="noopener">${esc(c.website.replace(/^https?:\/\//,"").replace(/\/$/,""))}</a>` : '<span class="muted">Ei verkkosivua</span>';
+  const maps = c.maps_url ? `<a href="${esc(c.maps_url)}" target="_blank" rel="noopener">Google Maps</a>` : "";
+  const phone = c.phone ? `<a class="phone" href="${esc(telHref(c.phone))}">${esc(c.phone)}</a>
+      <button class="btn" data-action="copy" title="Kopioi numero">Kopioi</button>`
+    : '<div class="muted" style="margin:14px 0">Ei puhelinnumeroa</div>';
+  const history = c.calls.length ? c.calls.map(h => `<div class="hist-item">
+      <div><span class="${stClass(h.outcome)}">${esc(h.outcome)}</span> <span class="muted">· ${esc(fmtDT(h.called_at))}</span></div>
+      ${h.note ? `<div>${esc(h.note)}</div>` : ""}</div>`).join("") : '<div class="muted">Ei vielä soittoja.</div>';
+
+  el.innerHTML = `<div class="grid">
+    <div class="card">
+      <div><span class="badge prio-${esc(c.priority)}">Prio ${esc(c.priority)}</span>
+        ${c.chain ? '<span class="tag">Ketju</span>' : ""}
+        <span class="tag">${esc(c.status)}${c.next_call_date ? " · " + esc(fmtD(c.next_call_date)) : ""}</span></div>
+      <div class="company-name">${esc(c.name)}</div>
+      <div class="muted">${esc([c.address, c.city].filter(Boolean).join(", "))}
+        ${c.reviews ? " · ★ " + esc(c.score ?? "") + " (" + c.reviews + " arvostelua)" : ""}</div>
+      <div>${phone}</div>
+      <div class="row">${site} ${maps ? "· " + maps : ""}</div>
+
+      <div class="label">Toimiston koko (arvio)</div>
+      <div class="row">
+        ${["1-2","3-9","10+"].map(s => `<button class="btn ${c.size_estimate === s ? "sel" : ""}" data-action="size" data-size="${s}">${s}</button>`).join("")}
+        <span class="muted" style="font-size:13px">1–2 poistaa yrityksen jonosta</span>
+      </div>
+
+      <div class="label">Yrityksen muistiinpanot</div>
+      <textarea id="notes" rows="3" placeholder="Pysyvät tiedot: päättäjä, nykyinen ohjelmisto…">${esc(c.notes)}</textarea>
+
+      <div class="label">Tämän soiton muistiinpano</div>
+      <input id="callNote" style="width:100%" placeholder="Mitä sovittiin?">
+      <div class="row" style="margin-top:10px">
+        <span class="muted">Takaisinsoitto:</span>
+        <input type="date" id="cbDate" value="${esc(c.next_call_date || addDays(2))}">
+      </div>
+
+      <div class="label">Tulos</div>
+      <div class="row">
+        ${OUTCOMES.map(([o,k,cls]) => `<button class="btn ${cls}" data-action="outcome" data-outcome="${esc(o)}">${esc(o)}<kbd>${k}</kbd></button>`).join("")}
+      </div>
+      <div class="row">
+        <button class="btn" data-action="skip">Ohita <kbd>S</kbd></button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="label" style="margin-top:0">Soittohistoria</div>
+      <div class="history">${history}</div>
+      ${c.lists.length ? `<div class="label">Listat</div><div class="muted">${c.lists.map(esc).join(", ")}</div>` : ""}
+    </div>
+  </div>`;
+}
+async function logOutcome(outcome) {
+  const c = state.current; if (!c) return;
+  try {
+    await saveNotes();
+    await api(`/api/companies/${c.id}/calls`, {
+      method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ outcome, note: $("#callNote").value, next_call_date: $("#cbDate").value || null }),
+    });
+    toast("Tallennettu: " + outcome);
+    await Promise.all([loadNext(), loadStats()]);
+  } catch (e) { toast("Virhe: " + e.message); }
+}
+async function saveNotes() {
+  const c = state.current, ta = $("#notes");
+  if (!c || !ta || ta.value === c.notes) return;
+  const d = await api(`/api/companies/${c.id}`, {
+    method: "PATCH", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ notes: ta.value }),
+  });
+  c.notes = d.notes;
+}
+async function setSize(size) {
+  const c = state.current; if (!c) return;
+  const next = c.size_estimate === size ? "" : size;
+  await saveNotes();
+  const d = await api(`/api/companies/${c.id}`, {
+    method: "PATCH", headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ size_estimate: next }),
+  });
+  if (next === "1-2") {
+    toast("Liian pieni, poistettu jonosta");
+    await Promise.all([loadNext(), loadStats()]);
+  } else { state.current = d; renderCall(); }
+}
+
+/* ---------- yritystaulukko ---------- */
+async function loadTable() {
+  const p = new URLSearchParams();
+  if (state.listId) p.set("list_id", state.listId);
+  if ($("#q").value) p.set("q", $("#q").value);
+  if ($("#fPrio").value) p.set("priority", $("#fPrio").value);
+  if ($("#fStatus").value) p.set("status", $("#fStatus").value);
+  if ($("#fSize").value) p.set("size", $("#fSize").value);
+  const r = await api("/api/companies?" + p);
+  $("#tableInfo").textContent = `${r.total} yritystä` + (r.total > r.items.length ? ` (näytetään ${r.items.length})` : "");
+  $("#tbody").innerHTML = r.items.map(c => `<tr data-action="open" data-id="${c.id}">
+    <td><span class="badge prio-${esc(c.priority)}">${esc(c.priority)}</span></td>
+    <td><b>${esc(c.name)}</b>${c.chain ? '<span class="tag">Ketju</span>' : ""}<div class="muted" style="font-size:12px">${esc(c.address)}</div></td>
+    <td>${esc(c.phone)}</td><td>${esc(c.size_estimate || "–")}</td>
+    <td><span class="${stClass(c.status)}">${esc(c.status)}</span></td>
+    <td>${esc(fmtD(c.next_call_date))}</td><td>${c.reviews || ""}</td></tr>`).join("")
+    || '<tr style="cursor:default"><td colspan="7" class="muted">Ei tuloksia.</td></tr>';
+}
+async function openCompany(id) {
+  state.current = await api("/api/companies/" + id);
+  switchTab("call");
+  renderCall();
+}
+
+/* ---------- tuonti ---------- */
+async function doImport() {
+  const f = $("#file").files[0];
+  if (!f) { toast("Valitse CSV-tiedosto"); return; }
+  const fd = new FormData();
+  fd.append("file", f); fd.append("list_name", $("#listName").value);
+  try {
+    const r = await api("/api/import", { method: "POST", body: fd });
+    $("#importResult").innerHTML = `<b>${esc(r.list_name)}</b>: lisätty <b>${r.added}</b> uutta, ` +
+      `<b>${r.existing}</b> oli jo tietokannassa, ${r.closed} suljettua ohitettu` +
+      (r.invalid ? `, ${r.invalid} riviä ilman nimeä` : "") + ".";
+    $("#file").value = ""; $("#listName").value = "";
+    await Promise.all([loadLists(), loadStats()]);
+  } catch (e) { $("#importResult").innerHTML = `<span style="color:var(--red)">Virhe: ${esc(e.message)}</span>`; }
+}
+
+/* ---------- navigointi ja tapahtumat ---------- */
+function switchTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  ["call","table","import"].forEach(t => $("#view-" + t).classList.toggle("hidden", t !== tab));
+  if (tab === "table") loadTable();
+  if (tab === "import") loadLists();
+}
+async function refreshAll() {
+  state.skip = [];
+  await Promise.all([loadStats(), loadNext()]);
+  if (state.tab === "table") loadTable();
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-action]"); if (!b) return;
+  const a = b.dataset.action;
+  if (a === "tab") switchTab(b.dataset.tab);
+  else if (a === "outcome") logOutcome(b.dataset.outcome);
+  else if (a === "size") setSize(b.dataset.size).catch(err => toast("Virhe: " + err.message));
+  else if (a === "skip") { if (state.current) { await saveNotes(); state.skip.push(state.current.id); loadNext(); } }
+  else if (a === "unskip") { state.skip = []; loadNext(); }
+  else if (a === "copy") { navigator.clipboard.writeText(state.current.phone).then(() => toast("Numero kopioitu")); }
+  else if (a === "open") openCompany(b.dataset.id);
+  else if (a === "import") doImport();
+});
+document.addEventListener("focusout", e => { if (e.target.id === "notes") saveNotes().catch(() => {}); });
+document.addEventListener("keydown", e => {
+  if (state.tab !== "call" || !state.current || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  const hit = OUTCOMES.find(o => o[1] === e.key);
+  if (hit) { e.preventDefault(); logOutcome(hit[0]); }
+  else if (e.key.toLowerCase() === "s") document.querySelector('[data-action="skip"]')?.click();
+});
+$("#listSel").addEventListener("change", e => { state.listId = e.target.value; refreshAll(); });
+$("#prioSel").addEventListener("change", e => { state.prio = e.target.value; refreshAll(); });
+["fPrio","fStatus","fSize"].forEach(id => $("#" + id).addEventListener("change", loadTable));
+let qTimer; $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(loadTable, 250); });
+
+$("#fStatus").innerHTML = '<option value="">Tila</option>' + STATUSES.map(s => `<option>${esc(s)}</option>`).join("");
+(async () => { await loadLists(); await refreshAll(); })().catch(e => toast("Virhe: " + e.message));
+</script>
+</body>
+</html>
