@@ -79,11 +79,24 @@ tbody tr:hover { background:var(--bg); }
 .toast.show { opacity:1; }
 .empty { text-align:center; padding:50px 10px; }
 .hidden { display:none; }
+.fgrid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px 14px; }
+@media (max-width: 600px) { .fgrid { grid-template-columns:1fr; } }
+.fld { display:flex; flex-direction:column; gap:3px; font-size:12px; font-weight:700; color:var(--muted);
+  text-transform:uppercase; letter-spacing:.5px; }
+.fld input, .fld select { width:100%; font-weight:400; text-transform:none; letter-spacing:0; font-size:15px; color:var(--text); }
+.fld.check { flex-direction:row; align-items:center; gap:8px; text-transform:none; letter-spacing:0;
+  font-size:15px; font-weight:600; color:var(--text); }
+.detail-top { max-width:1100px; margin:16px auto 0; padding:0 20px; }
+.contact { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:10px; }
+.contact .row { margin:4px 0; }
+.contact input { flex:1; min-width:140px; }
+a.namelink { color:inherit; text-decoration:none; font-weight:700; }
+a.namelink:hover { color:var(--link); text-decoration:underline; }
 .flex-between { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
 </style>
 </head>
 <body>
-<header>
+<header id="appHeader">
   <h1>📞 Soittolista</h1>
   <nav>
     <button data-action="tab" data-tab="call" class="active">Soita</button>
@@ -102,6 +115,7 @@ tbody tr:hover { background:var(--bg); }
 </header>
 
 <main>
+  <section id="view-detail" class="hidden"></section>
   <section id="view-call"></section>
 
   <section id="view-table" class="hidden">
@@ -217,6 +231,11 @@ async function loadNext() {
   state.current = r.company;
   renderCall();
 }
+function histHTML(calls) {
+  return calls.length ? calls.map(h => `<div class="hist-item">
+      <div><span class="${stClass(h.outcome)}">${esc(h.outcome)}</span> <span class="muted">· ${esc(fmtDT(h.called_at))}</span></div>
+      ${h.note ? `<div>${esc(h.note)}</div>` : ""}</div>`).join("") : '<div class="muted">Ei vielä soittoja.</div>';
+}
 function renderCall() {
   const el = $("#view-call"), c = state.current;
   if (!c) {
@@ -230,9 +249,7 @@ function renderCall() {
   const phone = c.phone ? `<a class="phone" href="${esc(telHref(c.phone))}">${esc(c.phone)}</a>
       <button class="btn" data-action="copy" title="Kopioi numero">Kopioi</button>`
     : '<div class="muted" style="margin:14px 0">Ei puhelinnumeroa</div>';
-  const history = c.calls.length ? c.calls.map(h => `<div class="hist-item">
-      <div><span class="${stClass(h.outcome)}">${esc(h.outcome)}</span> <span class="muted">· ${esc(fmtDT(h.called_at))}</span></div>
-      ${h.note ? `<div>${esc(h.note)}</div>` : ""}</div>`).join("") : '<div class="muted">Ei vielä soittoja.</div>';
+  const history = histHTML(c.calls);
 
   el.innerHTML = `<div class="grid">
     <div class="card">
@@ -323,7 +340,7 @@ async function loadTable() {
   $("#tableInfo").textContent = `${r.total} yritystä` + (r.total > r.items.length ? ` (näytetään ${r.items.length})` : "");
   $("#tbody").innerHTML = r.items.map(c => `<tr data-action="open" data-id="${c.id}">
     <td><span class="badge prio-${esc(c.priority)}">${esc(c.priority)}</span></td>
-    <td><b>${esc(c.name)}</b>${c.chain ? '<span class="tag">Ketju</span>' : ""}<div class="muted" style="font-size:12px">${esc(c.address)}</div></td>
+    <td><a class="namelink" href="/company/${c.id}" target="_blank" rel="noopener">${esc(c.name)}</a>${c.chain ? '<span class="tag">Ketju</span>' : ""}<div class="muted" style="font-size:12px">${esc(c.address)}</div></td>
     <td>${esc(c.phone)}</td><td>${esc(c.size_estimate || "–")}</td>
     <td><span class="${stClass(c.status)}">${esc(c.status)}</span></td>
     <td>${esc(fmtD(c.next_call_date))}</td><td>${c.reviews || ""}</td></tr>`).join("")
@@ -365,33 +382,233 @@ async function refreshAll() {
   if (state.tab === "table") loadTable();
 }
 
-document.addEventListener("click", async e => {
-  const b = e.target.closest("[data-action]"); if (!b) return;
-  const a = b.dataset.action;
-  if (a === "tab") switchTab(b.dataset.tab);
-  else if (a === "outcome") logOutcome(b.dataset.outcome);
-  else if (a === "size") setSize(b.dataset.size).catch(err => toast("Virhe: " + err.message));
-  else if (a === "skip") { if (state.current) { await saveNotes(); state.skip.push(state.current.id); loadNext(); } }
-  else if (a === "unskip") { state.skip = []; loadNext(); }
-  else if (a === "copy") { navigator.clipboard.writeText(state.current.phone).then(() => toast("Numero kopioitu")); }
-  else if (a === "open") openCompany(b.dataset.id);
-  else if (a === "import") doImport();
-});
-document.addEventListener("focusout", e => { if (e.target.id === "notes") saveNotes().catch(() => {}); });
-document.addEventListener("keydown", e => {
-  if (state.tab !== "call" || !state.current || e.ctrlKey || e.metaKey || e.altKey) return;
-  if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
-  const hit = OUTCOMES.find(o => o[1] === e.key);
-  if (hit) { e.preventDefault(); logOutcome(hit[0]); }
-  else if (e.key.toLowerCase() === "s") document.querySelector('[data-action="skip"]')?.click();
-});
-$("#listSel").addEventListener("change", e => { state.listId = e.target.value; refreshAll(); });
-$("#prioSel").addEventListener("change", e => { state.prio = e.target.value; refreshAll(); });
-["fPrio","fStatus","fSize"].forEach(id => $("#" + id).addEventListener("change", loadTable));
-let qTimer; $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(loadTable, 250); });
+/* Soittonäkymän tapahtumat rekisteröidään vain sovellusnäkymässä, ei yrityssivulla (/company/{id}). */
+function bootApp() {
+  document.addEventListener("click", async e => {
+    const b = e.target.closest("[data-action]"); if (!b) return;
+    const a = b.dataset.action;
+    if (a === "open" && e.target.closest("a[href]")) return; // yrityksen nimilinkki avaa oman välilehden
+    if (a === "tab") switchTab(b.dataset.tab);
+    else if (a === "outcome") logOutcome(b.dataset.outcome);
+    else if (a === "size") setSize(b.dataset.size).catch(err => toast("Virhe: " + err.message));
+    else if (a === "skip") { if (state.current) { await saveNotes(); state.skip.push(state.current.id); loadNext(); } }
+    else if (a === "unskip") { state.skip = []; loadNext(); }
+    else if (a === "copy") { navigator.clipboard.writeText(state.current.phone).then(() => toast("Numero kopioitu")); }
+    else if (a === "open") openCompany(b.dataset.id);
+    else if (a === "import") doImport();
+  });
+  document.addEventListener("focusout", e => { if (e.target.id === "notes") saveNotes().catch(() => {}); });
+  document.addEventListener("keydown", e => {
+    if (state.tab !== "call" || !state.current || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    const hit = OUTCOMES.find(o => o[1] === e.key);
+    if (hit) { e.preventDefault(); logOutcome(hit[0]); }
+    else if (e.key.toLowerCase() === "s") document.querySelector('[data-action="skip"]')?.click();
+  });
+  $("#listSel").addEventListener("change", e => { state.listId = e.target.value; refreshAll(); });
+  $("#prioSel").addEventListener("change", e => { state.prio = e.target.value; refreshAll(); });
+  ["fPrio","fStatus","fSize"].forEach(id => $("#" + id).addEventListener("change", loadTable));
+  let qTimer; $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(loadTable, 250); });
 
-$("#fStatus").innerHTML = '<option value="">Tila</option>' + STATUSES.map(s => `<option>${esc(s)}</option>`).join("");
-(async () => { await loadLists(); await refreshAll(); })().catch(e => toast("Virhe: " + e.message));
+  $("#fStatus").innerHTML = '<option value="">Tila</option>' + STATUSES.map(s => `<option>${esc(s)}</option>`).join("");
+  (async () => {
+    await loadLists(); await refreshAll();
+    if (location.hash === "#yritykset") switchTab("table"); // yrityssivun "← Soittolista"-linkki
+  })().catch(e => toast("Virhe: " + e.message));
+}
+
+/* ---------- yrityssivu (/company/{id}) ---------- */
+const DETAIL_ID = (location.pathname.match(/^\/company\/(\d+)\/?$/) || [])[1];
+const D_TEXT = [["name","Nimi"], ["phone","Puhelin"], ["website","Verkkosivu"],
+                ["address","Osoite"], ["city","Kaupunki"], ["category","Kategoria"]];
+const CONTACT_COLS = ["name","title","phone","email","notes"];
+// base = viimeksi palvelimelta saadut lomakearvot; tallennus lähettää vain niistä poikkeavat kentät
+const detail = { c:null, base:null, contacts:[], editing:null };
+
+function baseOf(c) {
+  return { name:c.name || "", phone:c.phone || "", website:c.website || "", address:c.address || "",
+    city:c.city || "", category:c.category || "", priority:c.priority || "C",
+    size_estimate:c.size_estimate || "", status:c.status, next_call_date:c.next_call_date || "",
+    chain:!!c.chain, do_not_call:!!c.do_not_call, notes:c.notes || "" };
+}
+function readForm() {
+  const v = {};
+  document.querySelectorAll("#dForm [data-f]").forEach(el => {
+    v[el.dataset.f] = el.type === "checkbox" ? el.checked : el.value;
+  });
+  return v;
+}
+function formDiff() {
+  const now = readForm(), diff = {};
+  for (const k in now) if (now[k] !== detail.base[k]) diff[k] = now[k];
+  return diff;
+}
+const opt = (v, sel, label) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(label ?? v)}</option>`;
+
+function renderDetailCompany() {
+  const c = detail.c, b = detail.base;
+  document.title = c.name + " – Soittolista";
+  const texts = D_TEXT.map(([k, label]) =>
+    `<label class="fld">${label}<input data-f="${k}" value="${esc(b[k])}"></label>`).join("");
+  const maps = c.maps_url ? `<a href="${esc(c.maps_url)}" target="_blank" rel="noopener">Google Maps</a>` : "";
+  const site = c.website ? `<a href="${esc(url(c.website))}" target="_blank" rel="noopener">Avaa verkkosivu</a>` : "";
+  const phone = c.phone ? `<a href="${esc(telHref(c.phone))}">Soita ${esc(c.phone)}</a>` : "";
+  $("#dCompany").innerHTML = `
+    <div><span class="badge prio-${esc(c.priority)}">Prio ${esc(c.priority)}</span>
+      ${c.chain ? '<span class="tag">Ketju</span>' : ""}
+      ${c.do_not_call ? '<span class="tag">Ei soittoja</span>' : ""}</div>
+    <div class="company-name">${esc(c.name)}</div>
+    <div class="muted">${c.reviews ? "★ " + esc(c.score ?? "") + " (" + c.reviews + " arvostelua)" : "Ei arvosteluja"}
+      ${c.lists.length ? " · Listat: " + c.lists.map(esc).join(", ") : ""}</div>
+    <div class="row">${[phone, site, maps].filter(Boolean).join(" · ")}</div>
+    <div id="dForm" style="margin-top:14px">
+      <div class="fgrid">${texts}
+        <label class="fld">Prioriteetti<select data-f="priority">${["A","B","C"].map(p => opt(p, b.priority)).join("")}</select></label>
+        <label class="fld">Toimiston koko (arvio)<select data-f="size_estimate">
+          ${opt("", b.size_estimate, "Ei arvioitu")}${["1-2","3-9","10+"].map(s => opt(s, b.size_estimate)).join("")}</select></label>
+        <label class="fld">Tila<select data-f="status">${STATUSES.map(s => opt(s, b.status)).join("")}</select></label>
+        <label class="fld">Seuraava soitto<input type="date" data-f="next_call_date" value="${esc(b.next_call_date)}"></label>
+        <label class="fld check"><input type="checkbox" data-f="chain" ${b.chain ? "checked" : ""}> Ketju</label>
+        <label class="fld check"><input type="checkbox" data-f="do_not_call" ${b.do_not_call ? "checked" : ""}> Ei markkinointisoittoja</label>
+      </div>
+      <div class="label">Muistiinpanot</div>
+      <textarea data-f="notes" rows="5" placeholder="Pysyvät tiedot: päättäjä, nykyinen ohjelmisto…">${esc(b.notes)}</textarea>
+      <div class="row" style="margin-top:12px">
+        <button class="btn sel" data-d="save">Tallenna</button>
+        <span class="muted" style="font-size:13px">Tallennus lähettää vain muuttamasi kentät.</span>
+      </div>
+    </div>`;
+  $("#dHistory").innerHTML = histHTML(c.calls);
+}
+
+function contactFormHTML(k) {
+  const v = col => esc(k[col] || "");
+  return `<div class="contact" data-contact="${k.id ?? "new"}">
+    <div class="row"><input data-cf="name" placeholder="Nimi *" value="${v("name")}">
+      <input data-cf="title" placeholder="Titteli" value="${v("title")}"></div>
+    <div class="row"><input data-cf="phone" placeholder="Puhelin" value="${v("phone")}">
+      <input data-cf="email" placeholder="Sähköposti" value="${v("email")}"></div>
+    <textarea data-cf="notes" rows="2" placeholder="Muistiinpanot">${v("notes")}</textarea>
+    <div class="row"><button class="btn sel" data-d="c-save">Tallenna</button>
+      <button class="btn" data-d="c-cancel">Peruuta</button></div></div>`;
+}
+function renderDetailContacts() {
+  const items = detail.contacts.map(k => detail.editing === k.id ? contactFormHTML(k) : `
+    <div class="contact">
+      <div class="flex-between"><b>${esc(k.name)}</b>
+        <span><button class="btn" data-d="c-edit" data-id="${k.id}">Muokkaa</button>
+          <button class="btn out-red" data-d="c-del" data-id="${k.id}">Poista</button></span></div>
+      <div class="muted">${esc(k.title)}</div>
+      <div>${k.phone ? `<a href="${esc(telHref(k.phone))}">${esc(k.phone)}</a>` : ""}
+        ${k.phone && k.email ? " · " : ""}
+        ${k.email ? `<a href="mailto:${esc(k.email)}">${esc(k.email)}</a>` : ""}</div>
+      ${k.notes ? `<div style="white-space:pre-wrap">${esc(k.notes)}</div>` : ""}
+    </div>`).join("");
+  $("#dContacts").innerHTML = (items || (detail.editing === "new" ? "" : '<div class="muted">Ei yhteyshenkilöitä.</div>')) +
+    (detail.editing === "new" ? contactFormHTML({}) :
+      '<div class="row"><button class="btn" data-d="c-new">+ Lisää yhteyshenkilö</button></div>');
+}
+
+async function saveCompany() {
+  const diff = formDiff();
+  if (!Object.keys(diff).length) { toast("Ei muutoksia"); return; }
+  if ("next_call_date" in diff && diff.next_call_date === "") diff.next_call_date = null;
+  const d = await api(`/api/companies/${DETAIL_ID}`, {
+    method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(diff),
+  });
+  detail.c = d; detail.base = baseOf(d);
+  renderDetailCompany();
+  toast("Tallennettu");
+}
+async function saveContact(block) {
+  const vals = {};
+  block.querySelectorAll("[data-cf]").forEach(el => { vals[el.dataset.cf] = el.value; });
+  const isNew = block.dataset.contact === "new";
+  let payload = vals;
+  if (!isNew) {
+    const old = detail.contacts.find(k => String(k.id) === block.dataset.contact) || {};
+    payload = {};
+    CONTACT_COLS.forEach(k => { if ((vals[k] ?? "") !== (old[k] ?? "")) payload[k] = vals[k]; });
+    if (!Object.keys(payload).length) { detail.editing = null; renderDetailContacts(); return; }
+  }
+  if (isNew && !vals.name.trim()) { toast("Nimi puuttuu"); return; }
+  detail.contacts = await api(
+    isNew ? `/api/companies/${DETAIL_ID}/contacts` : `/api/contacts/${block.dataset.contact}`,
+    { method: isNew ? "POST" : "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload) });
+  detail.editing = null;
+  renderDetailContacts();
+  toast("Yhteyshenkilö tallennettu");
+}
+
+async function loadDetail(first) {
+  const d = await api(`/api/companies/${DETAIL_ID}`);
+  detail.c = d; detail.base = baseOf(d);
+  if (first) { detail.contacts = d.contacts; renderDetailContacts(); }
+  renderDetailCompany();
+}
+
+function bootDetail() {
+  $("#appHeader").classList.add("hidden");
+  ["call","table","import"].forEach(t => $("#view-" + t).classList.add("hidden"));
+  const v = $("#view-detail");
+  v.classList.remove("hidden");
+  v.innerHTML = `<div class="flex-between" style="margin-bottom:14px">
+      <a href="/#yritykset" style="font-weight:600">← Soittolista</a><span class="muted">Yritys #${esc(DETAIL_ID)}</span></div>
+    <div class="grid">
+      <div>
+        <div class="card" id="dCompany"><div class="muted">Ladataan…</div></div>
+        <div class="card" style="margin-top:18px">
+          <div class="label" style="margin-top:0">Yhteyshenkilöt</div>
+          <div id="dContacts"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="label" style="margin-top:0">Soittohistoria</div>
+        <div class="history" id="dHistory"></div>
+        <p class="muted" style="font-size:13px">Soitot kirjataan Soita-näkymässä.</p>
+      </div>
+    </div>`;
+
+  document.addEventListener("click", async e => {
+    const b = e.target.closest("[data-d]"); if (!b) return;
+    const a = b.dataset.d;
+    try {
+      if (a === "save") await saveCompany();
+      else if (a === "c-new") { detail.editing = "new"; renderDetailContacts(); }
+      else if (a === "c-edit") { detail.editing = Number(b.dataset.id); renderDetailContacts(); }
+      else if (a === "c-cancel") { detail.editing = null; renderDetailContacts(); }
+      else if (a === "c-save") await saveContact(b.closest("[data-contact]"));
+      else if (a === "c-del") {
+        const k = detail.contacts.find(x => String(x.id) === b.dataset.id);
+        if (!confirm(`Poistetaanko yhteyshenkilö ${k ? k.name : ""}?`)) return;
+        detail.contacts = await api(`/api/contacts/${b.dataset.id}`, { method: "DELETE" });
+        renderDetailContacts();
+        toast("Poistettu");
+      }
+    } catch (err) { toast("Virhe: " + err.message); }
+  });
+  // soittokiellon poisto on tarkoituksellinen toimenpide: vahvistus ennen kuin ruksi lähtee pois
+  document.addEventListener("change", e => {
+    const el = e.target;
+    if (el.dataset && el.dataset.f === "do_not_call" && !el.checked && detail.base.do_not_call) {
+      if (!confirm("Poistetaanko soittokielto? Vaihda myös tila, jotta yritys palaa soittojonoon.")) el.checked = true;
+    }
+  });
+  // jos toisessa välilehdessä on kirjattu soitto, päivitä lomake takaisin ajan tasalle kun tämä välilehti aktivoituu
+  // (vain jos lomakkeessa ei ole tallentamattomia muutoksia)
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && detail.c && !Object.keys(formDiff()).length) {
+      loadDetail(false).catch(() => {});
+    }
+  });
+  loadDetail(true).catch(err => {
+    $("#dCompany").innerHTML = `<div class="empty"><h2>Yritystä ei löytynyt</h2>
+      <p class="muted">${esc(err.message)}</p><a href="/#yritykset">← Takaisin soittolistaan</a></div>`;
+    $("#dContacts").innerHTML = "";
+  });
+}
+
+if (DETAIL_ID) bootDetail(); else bootApp();
 </script>
 </body>
 </html>

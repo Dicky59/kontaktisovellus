@@ -10,7 +10,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -98,6 +98,18 @@ CREATE TABLE IF NOT EXISTS calls (
     note TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calls_company ON calls(company_id);
+CREATE TABLE IF NOT EXISTS contacts (
+    id INTEGER PRIMARY KEY,
+    company_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    title TEXT DEFAULT '',
+    phone TEXT DEFAULT '',
+    email TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
 """
 
 
@@ -243,7 +255,13 @@ def get_detail(conn, cid):
     d["lists"] = [r["name"] for r in conn.execute(
         "SELECT l.name FROM lists l JOIN company_lists cl ON cl.list_id=l.id "
         "WHERE cl.company_id=?", (cid,))]
+    d["contacts"] = get_contacts(conn, cid)
     return d
+
+
+def get_contacts(conn, cid):
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM contacts WHERE company_id=? ORDER BY name COLLATE NOCASE, id", (cid,))]
 
 
 def valid_date(s):
@@ -420,10 +438,16 @@ def company_detail(cid: int, conn=Depends(get_db)):
 
 
 class CompanyPatch(BaseModel):
+    name: Optional[str] = None
     size_estimate: Optional[str] = None
     notes: Optional[str] = None
     phone: Optional[str] = None
     website: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    category: Optional[str] = None
+    priority: Optional[str] = None
+    chain: Optional[bool] = None
     status: Optional[str] = None
     next_call_date: Optional[str] = None
     do_not_call: Optional[bool] = None
@@ -436,6 +460,24 @@ def patch_company(cid: int, body: CompanyPatch, conn=Depends(get_db)):
     data = body.model_dump(exclude_unset=True)
     sets, params = [], []
 
+    if "name" in data:
+        nm = (data["name"] or "").strip()
+        if not nm:
+            raise HTTPException(400, "Yrityksen nimi ei voi olla tyhjä")
+        sets.append("name=?")
+        params.append(nm)
+    for col in ("address", "city", "category"):
+        if col in data:
+            sets.append(f"{col}=?")  # col tulee vakioista, ei käyttäjältä
+            params.append((data[col] or "").strip())
+    if "priority" in data:
+        if data["priority"] not in ("A", "B", "C"):
+            raise HTTPException(400, "Virheellinen prioriteetti")
+        sets.append("priority=?")
+        params.append(data["priority"])
+    if "chain" in data:
+        sets.append("chain=?")
+        params.append(int(bool(data["chain"])))
     if "size_estimate" in data:
         if data["size_estimate"] not in SIZES:
             raise HTTPException(400, "Virheellinen koko")
@@ -505,6 +547,69 @@ def log_call(cid: int, body: CallIn, conn=Depends(get_db)):
     return get_detail(conn, cid)
 
 
+class ContactIn(BaseModel):
+    name: Optional[str] = None
+    title: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+
+
+CONTACT_FIELDS = ("name", "title", "phone", "email", "notes")
+
+
+@app.get("/api/companies/{cid}/contacts")
+def list_contacts(cid: int, conn=Depends(get_db)):
+    if not conn.execute("SELECT 1 FROM companies WHERE id=?", (cid,)).fetchone():
+        raise HTTPException(404, "Yritystä ei löytynyt")
+    return get_contacts(conn, cid)
+
+
+@app.post("/api/companies/{cid}/contacts")
+def create_contact(cid: int, body: ContactIn, conn=Depends(get_db)):
+    if not conn.execute("SELECT 1 FROM companies WHERE id=?", (cid,)).fetchone():
+        raise HTTPException(404, "Yritystä ei löytynyt")
+    vals = {k: (getattr(body, k) or "").strip() for k in CONTACT_FIELDS}
+    if not vals["name"]:
+        raise HTTPException(400, "Yhteyshenkilön nimi puuttuu")
+    now = now_iso()
+    conn.execute(
+        "INSERT INTO contacts(company_id, name, title, phone, email, notes, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (cid, vals["name"], vals["title"], vals["phone"], vals["email"], vals["notes"], now, now))
+    return get_contacts(conn, cid)
+
+
+@app.patch("/api/contacts/{contact_id}")
+def patch_contact(contact_id: int, body: ContactIn, conn=Depends(get_db)):
+    row = conn.execute("SELECT company_id FROM contacts WHERE id=?", (contact_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Yhteyshenkilöä ei löytynyt")
+    data = body.model_dump(exclude_unset=True)
+    sets, params = [], []
+    for k in CONTACT_FIELDS:
+        if k in data:
+            v = (data[k] or "").strip()
+            if k == "name" and not v:
+                raise HTTPException(400, "Yhteyshenkilön nimi puuttuu")
+            sets.append(f"{k}=?")  # k tulee vakioista, ei käyttäjältä
+            params.append(v)
+    if sets:
+        sets.append("updated_at=?")
+        params += [now_iso(), contact_id]
+        conn.execute(f"UPDATE contacts SET {', '.join(sets)} WHERE id=?", params)
+    return get_contacts(conn, row["company_id"])
+
+
+@app.delete("/api/contacts/{contact_id}")
+def delete_contact(contact_id: int, conn=Depends(get_db)):
+    row = conn.execute("SELECT company_id FROM contacts WHERE id=?", (contact_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Yhteyshenkilöä ei löytynyt")
+    conn.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
+    return get_contacts(conn, row["company_id"])
+
+
 @app.get("/api/stats")
 def stats(list_id: Optional[int] = None, prio: str = "", conn=Depends(get_db)):
     join, where, params = queue_query(list_id, prio)
@@ -546,6 +651,12 @@ def export_csv(conn=Depends(get_db)):
     data = ("\ufeff" + out.getvalue()).encode("utf-8")
     return Response(data, media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": f'attachment; filename="soittolista-{today_iso()}.csv"'})
+
+
+@app.get("/company/{cid}")
+def company_page(cid: int):
+    """Yrityssivu: sama yhden tiedoston frontend, joka tunnistaa polun itse."""
+    return FileResponse(BASE / "static" / "index.html")
 
 
 app.mount("/", StaticFiles(directory=BASE / "static", html=True), name="static")
