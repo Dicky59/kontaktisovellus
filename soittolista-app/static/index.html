@@ -101,6 +101,7 @@ a.namelink:hover { color:var(--link); text-decoration:underline; }
   <nav>
     <button data-action="tab" data-tab="call" class="active">Soita</button>
     <button data-action="tab" data-tab="table">Yritykset</button>
+    <button data-action="tab" data-tab="search">Hae toimiala</button>
     <button data-action="tab" data-tab="import">Listat ja vienti</button>
   </nav>
   <div class="filters">
@@ -137,6 +138,32 @@ a.namelink:hover { color:var(--link); text-decoration:underline; }
         </table>
       </div>
     </div>
+  </section>
+
+  <section id="view-search" class="hidden">
+    <div class="card">
+      <h2 style="margin-top:0">Hae toimiala (PRH/YTJ)</h2>
+      <p class="muted">Hakee yritykset PRH:n avoimesta rajapinnasta (ilmainen, ei Google-kutsuja). PRH ei anna
+        puhelinnumeroita, joten tuodut yritykset eivät tule soittojonoon ennen kuin numerot on haettu
+        (<code>02_enrich_places.py</code>) ja tuotu. Erota useampi haku pilkulla tai välilyönnillä.</p>
+      <div class="fgrid">
+        <label class="fld">Nimi<input id="sName" value="tilitoimisto kirjanpito"></label>
+        <label class="fld">TOL-koodi<input id="sCodes" value="69201"></label>
+        <label class="fld">Avainsanat (toimiala)<input id="sKeywords" value="kirjanpito"></label>
+        <label class="fld">Kaupunki<input id="sCity" value="Helsinki"></label>
+        <label class="fld">Yhtiömuoto
+          <select id="sForm"><option value="">Kaikki</option><option value="16" selected>Osakeyhtiö (16)</option></select></label>
+        <div>
+          <label class="fld check"><input type="checkbox" id="sRestrict" checked> Rajaa vain tähän TOL-koodiin</label>
+          <label class="fld check"><input type="checkbox" id="sInactive"> Sisällytä lopettaneet</label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn sel" id="prhPreviewBtn" data-action="prh-preview">Esikatsele</button>
+        <span class="muted" id="prhStatus"></span>
+      </div>
+    </div>
+    <div id="searchResult" style="margin-top:18px"></div>
   </section>
 
   <section id="view-import" class="hidden">
@@ -372,7 +399,7 @@ async function doImport() {
 function switchTab(tab) {
   state.tab = tab;
   document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
-  ["call","table","import"].forEach(t => $("#view-" + t).classList.toggle("hidden", t !== tab));
+  ["call","table","search","import"].forEach(t => $("#view-" + t).classList.toggle("hidden", t !== tab));
   if (tab === "table") loadTable();
   if (tab === "import") loadLists();
 }
@@ -380,6 +407,88 @@ async function refreshAll() {
   state.skip = [];
   await Promise.all([loadStats(), loadNext()]);
   if (state.tab === "table") loadTable();
+}
+
+/* ---------- PRH-haku (Hae toimiala) ---------- */
+const MATCH_LABELS = { y_tunnus:"y-tunnus", place_id:"Google-tunniste", maps_url:"Maps-linkki",
+  phone:"puhelin", domain:"verkkosivu", name_city:"nimi + kaupunki" };
+const prh = { body:null };
+
+function prhFormBody() {
+  return {
+    name: $("#sName").value, line_codes: $("#sCodes").value, keywords: $("#sKeywords").value,
+    city: $("#sCity").value, company_form: $("#sForm").value,
+    restrict_to_code: $("#sRestrict").checked, include_inactive: $("#sInactive").checked,
+  };
+}
+const postJson = (path, body) => api(path, {
+  method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body) });
+const matchBreakdown = by => Object.entries(by || {})
+  .map(([k, n]) => `${esc(MATCH_LABELS[k] || k)} ${n}`).join(", ");
+
+async function prhPreview() {
+  const btn = $("#prhPreviewBtn"), out = $("#searchResult");
+  const body = prhFormBody();
+  btn.disabled = true;
+  $("#prhStatus").textContent = "Haetaan PRH:sta, voi kestää noin 30 s…";
+  out.innerHTML = "";
+  try {
+    const r = await postJson("/api/prh/preview", body);
+    prh.body = body;
+    out.innerHTML = renderPrhPreview(r);
+  } catch (e) {
+    prh.body = null;
+    out.innerHTML = `<div class="card" style="color:var(--red)">Virhe: ${esc(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    $("#prhStatus").textContent = "";
+  }
+}
+function renderPrhPreview(r) {
+  const nc = r.existing_by.name_city || 0;
+  const rows = r.sample.map(s => `<tr style="cursor:default"><td><b>${esc(s.nimi)}</b></td><td>${esc(s.y_tunnus)}</td>
+    <td>${esc(s.toimiala)}</td><td>${esc(s.kaupunki)}</td><td>${esc(s.verkkosivu)}</td>
+    <td><span class="st ${s.tila === "uusi" ? "st-Kiinnostunut" : ""}">${esc(s.tila)}</span></td></tr>`).join("");
+  const pairs = r.name_city_pairs.map(p =>
+    `<tr style="cursor:default"><td>${esc(p.prh_nimi)}</td><td>${esc(p.db_nimi)}</td><td>${esc(p.kaupunki)}</td></tr>`).join("");
+  return `<div class="card">
+    <div class="label" style="margin-top:0">Esikatselu</div>
+    <div>PRH:sta löytyi <b>${r.total_unique}</b> yritystä, suodatuksen jälkeen <b>${r.matched}</b>:
+      <b>${r.new}</b> uutta ja <b>${r.existing}</b> jo tietokannassa
+      ${r.existing ? `<span class="muted">(${matchBreakdown(r.existing_by)})</span>` : ""}.
+      Verkkosivu: ${r.with_website}.</div>
+    ${nc ? `<div style="margin-top:8px;padding:8px 12px;border-radius:8px;background:var(--b);color:var(--b-text)">
+      <b>Nimi + kaupunki -yhdistämisiä: ${nc}.</b> Nämä yhdistetään pelkän täsmälleen samannimisen yrityksen
+      perusteella – tarkista parit ennen tuontia.
+      <details style="margin-top:6px"><summary>Näytä parit${nc > r.name_city_pairs.length ? ` (${r.name_city_pairs.length} / ${nc})` : ""}</summary>
+        <table><thead><tr><th>PRH-nimi</th><th>Tietokannan nimi</th><th>Kaupunki</th></tr></thead><tbody>${pairs}</tbody></table>
+      </details></div>` : `<div class="muted" style="margin-top:6px">Nimi + kaupunki -yhdistämisiä: 0.</div>`}
+    ${r.truncated ? `<div style="margin-top:8px;color:var(--yellow)">⚠ PRH ilmoitti enemmän tuloksia kuin palautti (tyypillisesti pieni ero) tai haku ylitti sivurajan; tulokset voivat olla vajaat.</div>` : ""}
+    ${r.errors.length ? `<div style="margin-top:8px;color:var(--red)">Osa hauista epäonnistui: ${r.errors.map(esc).join("; ")}</div>` : ""}
+    ${r.other_city ? `<div class="muted" style="margin-top:6px">${r.other_city} yrityksen osoite on muussa kaupungissa kuin kotipaikka (tuodaan silti).</div>` : ""}
+    <div class="label">Esimerkkirivit (${r.sample.length} / ${r.matched})</div>
+    <div style="overflow:auto"><table><thead><tr><th>Yritys</th><th>Y-tunnus</th><th>Toimiala</th><th>Kaupunki</th><th>Verkkosivu</th><th>Tila</th></tr></thead>
+      <tbody>${rows || '<tr style="cursor:default"><td colspan="6" class="muted">Ei tuloksia.</td></tr>'}</tbody></table></div>
+    ${r.matched ? `<div class="row" style="margin-top:14px">
+      <input id="prhListName" placeholder="Listan nimi (valinnainen)" style="min-width:260px">
+      <button class="btn sel" data-action="prh-import">Tuo uuteen listaan (${r.matched})</button></div>` : ""}
+  </div>`;
+}
+async function prhImport() {
+  if (!prh.body) { toast("Esikatsele ensin"); return; }
+  const body = { ...prh.body, list_name: $("#prhListName").value };
+  try {
+    const r = await postJson("/api/prh/import", body);
+    toast(`${r.list_name}: lisätty ${r.added}, oli jo ${r.existing}`);
+    prh.body = null;
+    $("#searchResult").innerHTML = `<div class="card"><b>${esc(r.list_name)}</b>: lisätty <b>${r.added}</b> uutta,
+      <b>${r.existing}</b> oli jo tietokannassa${r.existing ? ` <span class="muted">(${matchBreakdown(r.existing_by)})</span>` : ""}.</div>`;
+    await loadLists();
+    state.listId = String(r.list_id);
+    $("#listSel").value = state.listId;
+    switchTab("table");
+    refreshAll();
+  } catch (e) { toast("Virhe: " + e.message); }
 }
 
 /* Soittonäkymän tapahtumat rekisteröidään vain sovellusnäkymässä, ei yrityssivulla (/company/{id}). */
@@ -396,6 +505,8 @@ function bootApp() {
     else if (a === "copy") { navigator.clipboard.writeText(state.current.phone).then(() => toast("Numero kopioitu")); }
     else if (a === "open") openCompany(b.dataset.id);
     else if (a === "import") doImport();
+    else if (a === "prh-preview") prhPreview();
+    else if (a === "prh-import") prhImport();
   });
   document.addEventListener("focusout", e => { if (e.target.id === "notes") saveNotes().catch(() => {}); });
   document.addEventListener("keydown", e => {
@@ -458,7 +569,7 @@ function renderDetailCompany() {
       ${c.chain ? '<span class="tag">Ketju</span>' : ""}
       ${c.do_not_call ? '<span class="tag">Ei soittoja</span>' : ""}</div>
     <div class="company-name">${esc(c.name)}</div>
-    <div class="muted">${c.reviews ? "★ " + esc(c.score ?? "") + " (" + c.reviews + " arvostelua)" : "Ei arvosteluja"}
+    <div class="muted">${c.y_tunnus ? "Y-tunnus " + esc(c.y_tunnus) + " · " : ""}${c.reviews ? "★ " + esc(c.score ?? "") + " (" + c.reviews + " arvostelua)" : "Ei arvosteluja"}
       ${c.lists.length ? " · Listat: " + c.lists.map(esc).join(", ") : ""}</div>
     <div class="row">${[phone, site, maps].filter(Boolean).join(" · ")}</div>
     <div id="dForm" style="margin-top:14px">
@@ -549,7 +660,7 @@ async function loadDetail(first) {
 
 function bootDetail() {
   $("#appHeader").classList.add("hidden");
-  ["call","table","import"].forEach(t => $("#view-" + t).classList.add("hidden"));
+  ["call","table","search","import"].forEach(t => $("#view-" + t).classList.add("hidden"));
   const v = $("#view-detail");
   v.classList.remove("hidden");
   v.innerHTML = `<div class="flex-between" style="margin-bottom:14px">

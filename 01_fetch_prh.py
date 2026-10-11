@@ -41,13 +41,13 @@ DEFAULT_LINES = ["69201", "kirjanpito"]
 DEFAULT_NAMES = ["tilitoimisto", "kirjanpito"]
 
 
-def get(params, retries=5):
+def get(params, retries=5, log=print):
     for attempt in range(retries):
         r = requests.get(BASE, params=params, timeout=30,
                          headers={"User-Agent": "tilitoimisto-leads/1.0"})
         if r.status_code == 429:
             wait = 5 * (attempt + 1)
-            print(f"  429 (liian monta pyyntöä), odotetaan {wait} s…")
+            log(f"  429 (liian monta pyyntöä), odotetaan {wait} s…")
             time.sleep(wait)
             continue
         if r.status_code >= 500:
@@ -60,17 +60,17 @@ def get(params, retries=5):
     raise RuntimeError("PRH-rajapinta ei vastannut (429/5xx useita kertoja).")
 
 
-def fetch_all(params):
-    first = get({**params, "page": 1})
+def fetch_all(params, log=print):
+    first = get({**params, "page": 1}, log=log)
     total = first.get("totalResults", 0)
     companies = list(first.get("companies", []))
     pages = math.ceil(total / PAGE_SIZE)
     if pages > MAX_PAGES:
-        print(f"  Varoitus: {total} tulosta, haetaan vain {MAX_PAGES} sivua. Rajaa hakua.")
+        log(f"  Varoitus: {total} tulosta, haetaan vain {MAX_PAGES} sivua. Rajaa hakua.")
         pages = MAX_PAGES
     for page in range(2, pages + 1):
         time.sleep(0.4)
-        companies += get({**params, "page": page}).get("companies", [])
+        companies += get({**params, "page": page}, log=log).get("companies", [])
     return total, companies
 
 
@@ -146,6 +146,80 @@ def to_row(c, found_by):
     }
 
 
+def build_searches(lines=None, names=None):
+    """[(otsikko, lisäparametrit)]: toimialahaut ensin, sitten nimihaut."""
+    return [(f"toimiala={t}", {"mainBusinessLine": t}) for t in (lines or [])] + \
+           [(f"nimi={n}", {"name": n}) for n in (names or [])]
+
+
+def collect(searches, location, log=print, on_first=None):
+    """Ajaa haut ja yhdistää tulokset y-tunnuksen mukaan.
+
+    Palauttaa (found, truncated, errors): found = {y-tunnus: (yritys, [hakujen nimet])},
+    truncated = PRH:n kokonaisluku oli suurempi kuin haettu määrä,
+    errors = epäonnistuneiden hakujen virheilmoitukset.
+    on_first(yritys) kutsutaan kerran ensimmäiselle löydetylle yritykselle.
+    """
+    found = {}
+    truncated = False
+    errors = []
+    first_seen = False
+    for label, extra in searches:
+        params = {"location": location, **extra}
+        log(f"Haku {label} ({location})…")
+        try:
+            total, companies = fetch_all(params, log=log)
+        except Exception as e:  # noqa: BLE001
+            log(f"  Virhe: {e}")
+            errors.append(f"{label}: {e}")
+            continue
+        active = sum(1 for c in companies if is_active(c))
+        note = ""
+        if len(companies) < total:
+            truncated = True
+            note = "  (PRH:n kokonaisluku on suurempi kuin haettujen määrä)"
+        log(f"  tuloksia {total}, haettu {len(companies)}, aktiivisia {active}{note}")
+        if companies and not first_seen:
+            if on_first:
+                on_first(companies[0])
+            first_seen = True
+        for c in companies:
+            bid = (c.get("businessId") or {}).get("value")
+            if not bid:
+                continue
+            found.setdefault(bid, (c, []))[1].append(label)
+    return found, truncated, errors
+
+
+def filter_rows(found, include_inactive=False, forms=None, only_lines=None):
+    """Muuntaa löydetyt yritykset riveiksi ja suodattaa. Palauttaa (rows, uniikkeja ennen suodatusta)."""
+    rows = [to_row(c, " | ".join(labels)) for c, labels in found.values()]
+    total_unique = len(rows)
+    if not include_inactive:
+        rows = [r for r in rows if r["aktiivinen"] == "kyllä"]
+    if forms:
+        # Vastaa joko koodia (16) tai nimen osaa (osakeyhtiö)
+        wanted = [f.lower() for f in forms]
+        rows = [r for r in rows
+                if r["yhtiomuoto_koodi"].lower() in wanted
+                or any(w in r["yhtiomuoto"].lower() for w in wanted if not w.isdigit())]
+    if only_lines:
+        rows = [r for r in rows if any(r["toimiala_koodi"].startswith(p) for p in only_lines)]
+    rows.sort(key=lambda r: r["nimi"].lower())
+    return rows, total_unique
+
+
+def search_companies(location="Helsinki", lines=None, names=None, forms=None, only_lines=None,
+                     include_inactive=False, log=print):
+    """Koko haku yhdellä kutsulla (sovellus käyttää tätä).
+
+    Palauttaa {"rows", "total_unique", "truncated", "errors"}.
+    """
+    found, truncated, errors = collect(build_searches(lines, names), location, log=log)
+    rows, total_unique = filter_rows(found, include_inactive, forms, only_lines)
+    return {"rows": rows, "total_unique": total_unique, "truncated": truncated, "errors": errors}
+
+
 def main():
     ap = argparse.ArgumentParser(description="Hae yritykset PRH:n YTJ-rajapinnasta")
     ap.add_argument("--location", default="Helsinki", help="kotipaikka (oletus Helsinki)")
@@ -161,50 +235,19 @@ def main():
 
     if args.line is None and args.name is None:
         args.line, args.name = DEFAULT_LINES, DEFAULT_NAMES
-    searches = [(f"toimiala={t}", {"mainBusinessLine": t}) for t in (args.line or [])] + \
-               [(f"nimi={n}", {"name": n}) for n in (args.name or [])]
+    searches = build_searches(args.line, args.name)
 
-    found = {}  # y-tunnus -> (yritys, [hakujen nimet])
-    first_raw_saved = False
-    for label, extra in searches:
-        params = {"location": args.location, **extra}
-        print(f"Haku {label} ({args.location})…")
-        try:
-            total, companies = fetch_all(params)
-        except Exception as e:  # noqa: BLE001
-            print(f"  Virhe: {e}")
-            continue
-        active = sum(1 for c in companies if is_active(c))
-        note = "  (PRH:n kokonaisluku on suurempi kuin haettujen määrä)" if len(companies) < total else ""
-        print(f"  tuloksia {total}, haettu {len(companies)}, aktiivisia {active}{note}")
-        if companies and not first_raw_saved:
-            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-            sample = Path(args.out).with_name("prh_esimerkkivastaus.json")
-            sample.write_text(json.dumps(companies[0], ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"  Esimerkkivastaus tallennettu: {sample}")
-            first_raw_saved = True
-        for c in companies:
-            bid = (c.get("businessId") or {}).get("value")
-            if not bid:
-                continue
-            found.setdefault(bid, (c, []))[1].append(label)
+    def save_sample(company):
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        sample = Path(args.out).with_name("prh_esimerkkivastaus.json")
+        sample.write_text(json.dumps(company, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"  Esimerkkivastaus tallennettu: {sample}")
 
+    found, _, _ = collect(searches, args.location, on_first=save_sample)
     if not found:
         sys.exit("Ei tuloksia. Tarkista haut tai yhteys.")
 
-    rows = [to_row(c, " | ".join(labels)) for c, labels in found.values()]
-    total_unique = len(rows)
-    if not args.all:
-        rows = [r for r in rows if r["aktiivinen"] == "kyllä"]
-    if args.forms:
-        # Vastaa joko koodia (16) tai nimen osaa (osakeyhtiö)
-        wanted = [f.lower() for f in args.forms]
-        rows = [r for r in rows
-                if r["yhtiomuoto_koodi"].lower() in wanted
-                or any(w in r["yhtiomuoto"].lower() for w in wanted if not w.isdigit())]
-    if args.only_lines:
-        rows = [r for r in rows if any(r["toimiala_koodi"].startswith(p) for p in args.only_lines)]
-    rows.sort(key=lambda r: r["nimi"].lower())
+    rows, total_unique = filter_rows(found, args.all, args.forms, args.only_lines)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

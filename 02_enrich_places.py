@@ -366,6 +366,7 @@ def main():
             review.append({**base, "syy": "Osuma löytyi, mutta Googlessa ei puhelinnumeroa"})
         else:
             ok.append({
+                "y_tunnus": row["y_tunnus"],
                 "nimi": row["nimi"],
                 "puhelin": phone,
                 "verkkosivu": place.get("websiteUri") or row.get("verkkosivu", ""),
@@ -380,8 +381,8 @@ def main():
                                  + ("" if quality == "varma" else " · tarkista, että numero on oikean yrityksen"),
             })
 
-    ok_fields = ["nimi", "puhelin", "verkkosivu", "osoite", "kaupunki", "arvostelut", "arvosana",
-                 "google_maps", "placeId", "muistiinpanot"]
+    ok_fields = ["y_tunnus", "nimi", "puhelin", "verkkosivu", "osoite", "kaupunki", "arvostelut",
+                 "arvosana", "google_maps", "placeId", "muistiinpanot"]
     with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=ok_fields)
         w.writeheader()

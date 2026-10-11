@@ -1,9 +1,11 @@
 """Soittolista: paikallinen puhelinmyynnin soittolistasovellus (FastAPI + SQLite)."""
 import csv
+import importlib.util
 import io
 import re
 import shutil
 import sqlite3
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -48,6 +50,7 @@ FIELDS = {
     "priority": ["prioriteetti"],
     "size": ["koko_arvio"],
     "notes": ["muistiinpanot"],
+    "y_tunnus": ["y_tunnus"],
 }
 
 SCHEMA = """
@@ -141,8 +144,27 @@ def init_db():
     backup_db()
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+    migrate(conn)
     conn.commit()
     conn.close()
+
+
+def migrate(conn):
+    """Turvalliset, toistettavat migraatiot: vain lisäyksiä, ei poistoja eikä uudelleenkirjoitusta."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(companies)")}
+    if "y_tunnus" not in cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN y_tunnus TEXT DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_c_ytunnus ON companies(y_tunnus)")
+    # Täytä puuttuva y-tunnus muistiinpanoista ("Y-tunnus 1234567-8"), jonka 02_enrich_places.py kirjoitti.
+    # Ei koskaan ylikirjoita olemassa olevaa arvoa eikä muokkaa muistiinpanoja.
+    todo = conn.execute(
+        "SELECT id, notes FROM companies "
+        "WHERE COALESCE(y_tunnus,'')='' AND notes LIKE '%Y-tunnus%'").fetchall()
+    for cid, notes in todo:
+        m = re.search(r"Y-tunnus\s+(\d{7}-\d)", notes or "", re.I)
+        if m:
+            conn.execute("UPDATE companies SET y_tunnus=? WHERE id=? AND COALESCE(y_tunnus,'')=''",
+                         (m.group(1), cid))
 
 
 def get_db():
@@ -227,21 +249,99 @@ def parse_csv(raw: bytes):
     return list(csv.DictReader(io.StringIO(text), delimiter=delim))
 
 
-def find_existing(conn, place_id, maps_url, phone_norm, domain):
+def find_existing(conn, rec, nc_index=None):
+    """Etsii rekisteristä saman yrityksen. Palauttaa (id, mistä) tai (None, None).
+
+    Järjestys: y_tunnus, place_id, maps_url, phone, domain (ketjuilla ei domainia), ja vain jos
+    nc_index annetaan, täsmälleen sama nimi + kaupunki ("name_city"). Mikään heikompi avain
+    (place_id, maps_url, phone, domain, name_city) ei yhdistä yritystä, jolla on jo eri y-tunnus,
+    eikä name_city yhdistä ketjun toimipisteitä.
+    """
     checks = []
-    if place_id:
-        checks.append(("place_id", place_id))
-    if maps_url:
-        checks.append(("maps_url", maps_url))
-    if phone_norm:
-        checks.append(("phone_norm", phone_norm))
-    if domain:
-        checks.append(("domain", domain))
-    for col, val in checks:  # col tulee vakioista, ei käyttäjältä
-        r = conn.execute(f"SELECT id FROM companies WHERE {col}=? LIMIT 1", (val,)).fetchone()
-        if r:
-            return r["id"]
-    return None
+    if rec.get("y_tunnus"):
+        checks.append(("y_tunnus", "y_tunnus", rec["y_tunnus"]))
+    if rec.get("place_id"):
+        checks.append(("place_id", "place_id", rec["place_id"]))
+    if rec.get("maps_url"):
+        checks.append(("maps_url", "maps_url", rec["maps_url"]))
+    if rec.get("phone_norm"):
+        checks.append(("phone", "phone_norm", rec["phone_norm"]))
+    # Ketjun toimipisteet jakavat usein verkkosivun, joten ketjuille ei yhdistetä domainilla
+    if rec.get("domain") and not rec.get("chain"):
+        checks.append(("domain", "domain", rec["domain"]))
+    for via, col, val in checks:  # col tulee vakioista, ei käyttäjältä
+        for r in conn.execute(f"SELECT id, y_tunnus FROM companies WHERE {col}=?", (val,)):
+            # Eri y-tunnus = eri yritys, vaikka verkkosivu/puhelin olisi sama (esim. konsernin yhteinen sivu)
+            if via != "y_tunnus" and rec.get("y_tunnus") and r["y_tunnus"] \
+                    and r["y_tunnus"] != rec["y_tunnus"]:
+                continue
+            return r["id"], via
+    if nc_index is not None and not rec.get("chain") and rec.get("name") and rec.get("city"):
+        for cid, ytunnus, _name in nc_index.get(nc_key(rec["name"], rec["city"]), []):
+            if not ytunnus or ytunnus == rec.get("y_tunnus"):
+                return cid, "name_city"
+    return None, None
+
+
+def nc_key(name, city):
+    return (" ".join((name or "").split()).casefold(), (city or "").strip().casefold())
+
+
+def name_city_index(conn):
+    """{(nimi, kaupunki): [(id, y_tunnus, nimi)]} ei-ketjuyrityksistä nimi+kaupunki-vertailuun."""
+    idx = {}
+    for r in conn.execute("SELECT id, name, city, y_tunnus FROM companies WHERE chain=0"):
+        idx.setdefault(nc_key(r["name"], r["city"]), []).append(
+            (r["id"], r["y_tunnus"] or "", r["name"]))
+    return idx
+
+
+def upsert_company(conn, rec, list_id, nc_index=None):
+    """Lisää yrityksen tai täydentää puuttuvat kentät vanhaan. Palauttaa ("added"|"matched", mistä)."""
+    existing, via = find_existing(conn, rec, nc_index)
+    if existing:
+        conn.execute(
+            """UPDATE companies SET
+               phone = CASE WHEN COALESCE(phone,'')='' THEN ? ELSE phone END,
+               phone_norm = CASE WHEN COALESCE(phone_norm,'')='' THEN ? ELSE phone_norm END,
+               website = CASE WHEN COALESCE(website,'')='' THEN ? ELSE website END,
+               domain = CASE WHEN COALESCE(domain,'')='' THEN ? ELSE domain END,
+               place_id = CASE WHEN COALESCE(place_id,'')='' THEN ? ELSE place_id END,
+               maps_url = CASE WHEN COALESCE(maps_url,'')='' THEN ? ELSE maps_url END,
+               y_tunnus = CASE WHEN COALESCE(y_tunnus,'')='' THEN ? ELSE y_tunnus END
+               WHERE id=?""",
+            (rec["phone"], rec["phone_norm"], rec["website"], rec["domain"], rec["place_id"],
+             rec["maps_url"], rec.get("y_tunnus", ""), existing))
+        conn.execute("INSERT OR IGNORE INTO company_lists VALUES (?,?)", (existing, list_id))
+        return "matched", via
+
+    given = (rec.get("priority") or "").upper()
+    prio = given if given in ("A", "B", "C") else compute_priority(
+        rec["real_site"], rec["reviews"], rec["chain"], bool(rec["phone"]))
+    size = rec.get("size", "")
+    size = size if size in SIZES else ""
+    now = now_iso()
+    cid = conn.execute(
+        """INSERT INTO companies
+           (name, phone, phone_norm, website, domain, address, city, reviews, score, chain,
+            category, place_id, maps_url, priority, size_estimate, notes, status, y_tunnus,
+            created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (rec["name"], rec["phone"], rec["phone_norm"], rec["website"], rec["domain"],
+         rec.get("address", ""), rec.get("city", ""), rec["reviews"], rec.get("score"),
+         int(rec["chain"]), rec.get("category", ""), rec["place_id"], rec["maps_url"], prio,
+         size, rec.get("notes", ""), "Ei soitettu", rec.get("y_tunnus", ""), now, now)).lastrowid
+    conn.execute("INSERT INTO company_lists VALUES (?,?)", (cid, list_id))
+    return "added", None
+
+
+def rec_from_website(name, website, phone, chain_flag=False):
+    """Yhteiset johdetut kentät: domain (vain oikeat sivut), puhelimen normalisointi, ketjuarvaus."""
+    domain = domain_of(website)
+    real = is_real_website(domain)
+    domain = domain if real else ""
+    return {"domain": domain, "real_site": real, "phone_norm": norm_phone(phone),
+            "chain": is_chain(name, domain) or chain_flag}
 
 
 def get_detail(conn, cid):
@@ -332,47 +432,22 @@ def import_csv(file: UploadFile = File(...), list_name: str = Form(""), conn=Dep
             continue
 
         phone, website = pick(row, "phone"), pick(row, "website")
-        domain = domain_of(website)
-        real = is_real_website(domain)
-        domain = domain if real else ""
-        pnorm = norm_phone(phone)
-        chain = is_chain(cname, domain) or pick(row, "chain").lower() in ("kyllä", "kylla", "true", "1", "yes")
-        place_id, maps_url = pick(row, "place_id"), pick(row, "maps_url")
-
-        # Ketjun toimipisteet jakavat usein verkkosivun, joten ketjuille ei yhdistetä domainilla
-        existing = find_existing(conn, place_id, maps_url, pnorm, "" if chain else domain)
-        if existing:
-            conn.execute(
-                """UPDATE companies SET
-                   phone = CASE WHEN COALESCE(phone,'')='' THEN ? ELSE phone END,
-                   phone_norm = CASE WHEN COALESCE(phone_norm,'')='' THEN ? ELSE phone_norm END,
-                   website = CASE WHEN COALESCE(website,'')='' THEN ? ELSE website END,
-                   domain = CASE WHEN COALESCE(domain,'')='' THEN ? ELSE domain END,
-                   place_id = CASE WHEN COALESCE(place_id,'')='' THEN ? ELSE place_id END,
-                   maps_url = CASE WHEN COALESCE(maps_url,'')='' THEN ? ELSE maps_url END
-                   WHERE id=?""",
-                (phone, pnorm, website, domain, place_id, maps_url, existing))
-            conn.execute("INSERT OR IGNORE INTO company_lists VALUES (?,?)", (existing, list_id))
+        chain_flag = pick(row, "chain").lower() in ("kyllä", "kylla", "true", "1", "yes")
+        rec = {
+            "name": cname, "phone": phone, "website": website,
+            **rec_from_website(cname, website, phone, chain_flag),
+            "address": pick(row, "address"), "city": pick(row, "city"),
+            "reviews": to_int(pick(row, "reviews")), "score": to_float(pick(row, "score")),
+            "category": pick(row, "category"), "place_id": pick(row, "place_id"),
+            "maps_url": pick(row, "maps_url"), "priority": pick(row, "priority"),
+            "size": pick(row, "size"), "notes": pick(row, "notes"),
+            "y_tunnus": pick(row, "y_tunnus"),
+        }
+        result, _via = upsert_company(conn, rec, list_id)
+        if result == "matched":
             matched += 1
-            continue
-
-        reviews = to_int(pick(row, "reviews"))
-        given = pick(row, "priority").upper()
-        prio = given if given in ("A", "B", "C") else compute_priority(real, reviews, chain, bool(phone))
-        size = pick(row, "size")
-        size = size if size in SIZES else ""
-        now = now_iso()
-        cid = conn.execute(
-            """INSERT INTO companies
-               (name, phone, phone_norm, website, domain, address, city, reviews, score, chain,
-                category, place_id, maps_url, priority, size_estimate, notes, status,
-                created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (cname, phone, pnorm, website, domain, pick(row, "address"), pick(row, "city"),
-             reviews, to_float(pick(row, "score")), int(chain), pick(row, "category"),
-             place_id, maps_url, prio, size, pick(row, "notes"), "Ei soitettu", now, now)).lastrowid
-        conn.execute("INSERT INTO company_lists VALUES (?,?)", (cid, list_id))
-        added += 1
+        else:
+            added += 1
 
     return {"list_id": list_id, "list_name": name, "added": added,
             "existing": matched, "closed": closed, "invalid": invalid}
@@ -608,6 +683,159 @@ def delete_contact(contact_id: int, conn=Depends(get_db)):
         raise HTTPException(404, "Yhteyshenkilöä ei löytynyt")
     conn.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
     return get_contacts(conn, row["company_id"])
+
+
+# ---------- PRH-haku (Hae toimiala) ----------
+# Hakulogiikka on repon juuren 01_fetch_prh.py:ssä (sama koodi kuin komentorivillä). Ei Google Places -kutsuja.
+
+PRH_CACHE = {}  # hakuavain -> (aikaleima, tulos); sama haku esikatselusta tuontiin ilman uutta hakua
+PRH_TTL = 30 * 60
+_prh_mod = None
+
+
+def prh_module():
+    global _prh_mod
+    if _prh_mod is None:
+        path = BASE.parent / "01_fetch_prh.py"
+        if not path.exists():
+            raise HTTPException(503, "Tiedostoa 01_fetch_prh.py ei löydy projektin juuresta.")
+        try:
+            spec = importlib.util.spec_from_file_location("fetch_prh", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except ModuleNotFoundError as e:
+            raise HTTPException(
+                503, f"Puuttuva kirjasto: {e.name}. Asenna: .venv\\Scripts\\pip install -r requirements.txt")
+        _prh_mod = mod
+    return _prh_mod
+
+
+class PrhSearch(BaseModel):
+    name: str = ""
+    line_codes: str = ""
+    keywords: str = ""
+    city: str = "Helsinki"
+    company_form: str = ""
+    restrict_to_code: bool = True
+    include_inactive: bool = False
+
+
+class PrhImport(PrhSearch):
+    list_name: str = ""
+
+
+def split_terms(s):
+    """Pilkulla/puolipisteellä/rivinvaihdolla erotetut haut; ilman niitä välilyönnillä."""
+    s = (s or "").strip()
+    if not s:
+        return []
+    parts = re.split(r"[,;\n]+", s) if re.search(r"[,;\n]", s) else s.split()
+    return [p.strip() for p in parts if p.strip()]
+
+
+def prh_run(body):
+    codes, keywords, names = split_terms(body.line_codes), split_terms(body.keywords), split_terms(body.name)
+    city = body.city.strip()
+    if not city:
+        raise HTTPException(400, "Kaupunki puuttuu")
+    if not (codes or keywords or names):
+        raise HTTPException(400, "Anna vähintään nimi, TOL-koodi tai avainsana")
+    if any(not re.fullmatch(r"\d{2,6}", c) for c in codes):
+        raise HTTPException(400, "TOL-koodin pitää olla numeroita, esim. 69201")
+    only_lines = codes if body.restrict_to_code else []
+    form = body.company_form.strip()
+    key = (tuple(codes + keywords), tuple(names), city.casefold(), form.casefold(),
+           tuple(only_lines), bool(body.include_inactive))
+
+    now = time.time()
+    for k in [k for k, (t, _) in PRH_CACHE.items() if now - t > PRH_TTL]:
+        del PRH_CACHE[k]
+    if key in PRH_CACHE:
+        return PRH_CACHE[key][1]
+
+    mod = prh_module()
+    try:
+        res = mod.search_companies(
+            location=city, lines=codes + keywords, names=names, forms=[form] if form else None,
+            only_lines=only_lines or None, include_inactive=body.include_inactive, log=lambda m: None)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"PRH-haku epäonnistui: {e}")
+    if res["errors"] and res["total_unique"] == 0:
+        raise HTTPException(502, "PRH-haku epäonnistui: " + "; ".join(res["errors"]))
+    PRH_CACHE[key] = (now, res)
+    return res
+
+
+def rec_from_prh(r):
+    name, website, phone = r.get("nimi", ""), r.get("verkkosivu", ""), r.get("puhelin", "")
+    return {
+        "name": name, "phone": phone, "website": website,
+        **rec_from_website(name, website, phone),
+        "address": r.get("osoite", ""), "city": (r.get("kaupunki") or "").title(),
+        "reviews": 0, "score": None, "category": r.get("toimiala", ""),
+        "place_id": "", "maps_url": "", "priority": "", "size": "", "notes": "",
+        "y_tunnus": r.get("y_tunnus", ""),
+    }
+
+
+@app.post("/api/prh/preview")
+def prh_preview(body: PrhSearch, conn=Depends(get_db)):
+    res = prh_run(body)
+    nc = name_city_index(conn)
+    by = {}
+    new = existing = with_website = other_city = 0
+    pairs, sample = [], []
+    want_city = body.city.strip().casefold()
+    for r in res["rows"]:
+        rec = rec_from_prh(r)
+        cid, via = find_existing(conn, rec, nc)
+        if cid:
+            existing += 1
+            by[via] = by.get(via, 0) + 1
+            if via == "name_city" and len(pairs) < 20:
+                db_name = next((n for i, _y, n in nc.get(nc_key(rec["name"], rec["city"]), []) if i == cid), "")
+                pairs.append({"prh_nimi": rec["name"], "db_nimi": db_name, "kaupunki": rec["city"]})
+        else:
+            new += 1
+        if r.get("verkkosivu"):
+            with_website += 1
+        if rec["city"] and rec["city"].casefold() != want_city:
+            other_city += 1
+        if len(sample) < 20:
+            sample.append({
+                "nimi": r.get("nimi", ""), "y_tunnus": r.get("y_tunnus", ""),
+                "toimiala": r.get("toimiala", ""), "kaupunki": rec["city"],
+                "verkkosivu": r.get("verkkosivu", ""),
+                "tila": f"olemassa ({via})" if cid else "uusi"})
+    return {
+        "total_unique": res["total_unique"], "matched": len(res["rows"]), "new": new,
+        "existing": existing, "existing_by": by, "name_city_pairs": pairs,
+        "with_website": with_website, "other_city": other_city,
+        "truncated": res["truncated"], "errors": res["errors"], "sample": sample,
+    }
+
+
+@app.post("/api/prh/import")
+def prh_import(body: PrhImport, conn=Depends(get_db)):
+    res = prh_run(body)
+    rows = res["rows"]
+    if not rows:
+        raise HTTPException(400, "Haulla ei löytynyt tuotavia yrityksiä")
+    name = body.list_name.strip() or f"PRH {body.city.strip()} {today_iso()}"
+    list_id = conn.execute(
+        "INSERT INTO lists(name, imported_at) VALUES (?,?)", (name, now_iso())).lastrowid
+    nc = name_city_index(conn)
+    added = matched = 0
+    by = {}
+    for r in rows:
+        result, via = upsert_company(conn, rec_from_prh(r), list_id, nc)
+        if result == "matched":
+            matched += 1
+            by[via] = by.get(via, 0) + 1
+        else:
+            added += 1
+    return {"list_id": list_id, "list_name": name, "added": added, "existing": matched,
+            "existing_by": by}
 
 
 @app.get("/api/stats")
