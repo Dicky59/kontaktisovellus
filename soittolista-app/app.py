@@ -21,8 +21,8 @@ DATA = BASE / "data"
 DB_PATH = DATA / "soittolista.db"
 
 STATUSES = [
-    "Ei soitettu", "Ei vastaa", "Soita uudelleen", "Kiinnostunut",
-    "Ei kiinnostunut", "Väärä numero", "Ei markkinointisoittoja",
+    "Ei soitettu", "Soita uudelleen", "Kiinnostunut",
+    "Ei kiinnostunut", "AI-auditointi sovittu",
 ]
 OUTCOMES = STATUSES[1:]
 SIZES = ["", "1-2", "3-9", "10+"]
@@ -155,6 +155,9 @@ def migrate(conn):
     if "y_tunnus" not in cols:
         conn.execute("ALTER TABLE companies ADD COLUMN y_tunnus TEXT DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_c_ytunnus ON companies(y_tunnus)")
+    # Poistetut tilat: yritykset takaisin jonoon. Soittohistoria (calls) jää koskemattomaksi.
+    conn.execute("UPDATE companies SET status='Ei soitettu' WHERE status IN ('Ei vastaa','Väärä numero')")
+    conn.execute("UPDATE companies SET status='Ei soitettu', do_not_call=1 WHERE status='Ei markkinointisoittoja'")
     # Täytä puuttuva y-tunnus muistiinpanoista ("Y-tunnus 1234567-8"), jonka 02_enrich_places.py kirjoitti.
     # Ei koskaan ylikirjoita olemassa olevaa arvoa eikä muokkaa muistiinpanoja.
     todo = conn.execute(
@@ -380,7 +383,6 @@ QUEUE_WHERE = """
     AND (
         (c.status='Soita uudelleen' AND c.next_call_date IS NOT NULL AND c.next_call_date<=?)
         OR c.status='Ei soitettu'
-        OR (c.status='Ei vastaa' AND date(c.last_called_at)<?)
     )
 """
 
@@ -390,8 +392,7 @@ def queue_query(list_id, prio):
     if list_id:
         join = " JOIN company_lists cl ON cl.company_id=c.id AND cl.list_id=?"
         params.append(list_id)
-    today = today_iso()
-    params += [today, today]
+    params += [today_iso()]
     pc, pp = prio_clause(prio)
     return join, f" WHERE {QUEUE_WHERE}{pc}", params + pp
 
@@ -400,6 +401,15 @@ def queue_query(list_id, prio):
 
 init_db()
 app = FastAPI(title="Soittolista")
+
+
+@app.middleware("http")
+async def no_cache(request, call_next):
+    """Paikallinen sovellus: selain ei saa tarjota vanhaa index.html:ää."""
+    resp = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.get("/api/lists")
@@ -575,8 +585,6 @@ def patch_company(cid: int, body: CompanyPatch, conn=Depends(get_db)):
         params.append(data["status"])
         if data["status"] == "Soita uudelleen" and not data.get("next_call_date"):
             data["next_call_date"] = (date.today() + timedelta(days=2)).isoformat()
-        if data["status"] == "Ei markkinointisoittoja":
-            data["do_not_call"] = True
     if "next_call_date" in data:
         nd = data["next_call_date"] or None
         if nd and not valid_date(nd):
@@ -612,7 +620,7 @@ def log_call(cid: int, body: CallIn, conn=Depends(get_db)):
     if body.outcome == "Soita uudelleen":
         next_date = body.next_call_date if valid_date(body.next_call_date) else \
             (date.today() + timedelta(days=2)).isoformat()
-    dnc = 1 if body.outcome == "Ei markkinointisoittoja" else c["do_not_call"]
+    dnc = c["do_not_call"]
     now = now_iso()
     conn.execute("INSERT INTO calls(company_id, called_at, outcome, note) VALUES (?,?,?,?)",
                  (cid, now, body.outcome, body.note.strip()))

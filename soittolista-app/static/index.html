@@ -71,7 +71,7 @@ tbody tr { cursor:pointer; }
 tbody tr:hover { background:var(--bg); }
 .st { font-size:13px; font-weight:600; }
 .st-Kiinnostunut { color:var(--green); }
-.st-Soita { color:var(--yellow); }
+.st-Soita-uudelleen, .st-AI-auditointi-sovittu { color:var(--yellow); }
 .st-Ei-kiinnostunut, .st-Väärä, .st-Ei-markkinointisoittoja { color:var(--red); }
 .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:var(--accent);
   color:var(--accent-text); padding:10px 18px; border-radius:10px; font-weight:600; opacity:0;
@@ -99,8 +99,8 @@ a.namelink:hover { color:var(--link); text-decoration:underline; }
 <header id="appHeader">
   <h1>📞 Soittolista</h1>
   <nav>
-    <button data-action="tab" data-tab="call" class="active">Soita</button>
-    <button data-action="tab" data-tab="table">Yritykset</button>
+    <button data-action="tab" data-tab="call">Soita</button>
+    <button data-action="tab" data-tab="table" class="active">Yritykset</button>
     <button data-action="tab" data-tab="search">Hae toimiala</button>
     <button data-action="tab" data-tab="import">Listat ja vienti</button>
   </nav>
@@ -194,10 +194,10 @@ a.namelink:hover { color:var(--link); text-decoration:underline; }
 <div class="toast" id="toast"></div>
 
 <script>
-const STATUSES = ["Ei soitettu","Ei vastaa","Soita uudelleen","Kiinnostunut","Ei kiinnostunut","Väärä numero","Ei markkinointisoittoja"];
+const STATUSES = ["Ei soitettu","Soita uudelleen","Kiinnostunut","Ei kiinnostunut","AI-auditointi sovittu"];
 const OUTCOMES = [
-  ["Ei vastaa","1",""], ["Soita uudelleen","2","out-yellow"], ["Kiinnostunut","3","out-green"],
-  ["Ei kiinnostunut","4","out-red"], ["Väärä numero","5",""], ["Ei markkinointisoittoja","6","out-red"],
+  ["Soita uudelleen","1","out-yellow"], ["Kiinnostunut","2","out-green"],
+  ["Ei kiinnostunut","3","out-red"], ["AI-auditointi sovittu","4","out-green"],
 ];
 const state = { tab:"call", listId:"", prio:"", skip:[], current:null, queue:0 };
 
@@ -522,9 +522,9 @@ function bootApp() {
   let qTimer; $("#q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(loadTable, 250); });
 
   $("#fStatus").innerHTML = '<option value="">Tila</option>' + STATUSES.map(s => `<option>${esc(s)}</option>`).join("");
+  switchTab("table"); // avautuu Yritykset-välilehdelle (myös yrityssivun "← Soittolista"-linkki)
   (async () => {
     await loadLists(); await refreshAll();
-    if (location.hash === "#yritykset") switchTab("table"); // yrityssivun "← Soittolista"-linkki
   })().catch(e => toast("Virhe: " + e.message));
 }
 
