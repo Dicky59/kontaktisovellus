@@ -9,6 +9,13 @@ Käyttö (projektin juuresta, venv aktiivisena):
     python 02_enrich_places.py --chains           # ketjujen (Talenom, Accountor, Azets, Administer) Helsingin toimistot
     python 02_enrich_places.py --chains BDO Crowe --city Helsinki   # omat ketjut
 
+Muut toimialat (esim. lakitoimistot) ilman että tilitoimistodata muuttuu:
+    python 02_enrich_places.py --dry-run --in data/prh_laki.csv --out data/laki_rikastettu.csv \
+        --review data/laki_tarkista.csv --cache data/places_cache_laki.json \
+        --generic asianajotoimisto lakiasiaintoimisto lakitoimisto attorneys law legal advokat \
+                  asianajajat asianajo advokatbyrå at
+    (--chain-term ja --chain-skip muuttavat ketjuhaun hakusanan ja ohitettavat nimet)
+
 Tarvitsee tiedoston .env:   GOOGLE_PLACES_KEY=...
 Syöte:  data/prh_pohja.csv  (01_fetch_prh.py)
 Tulos:  data/prh_rikastettu.csv   varmat ja todennäköiset osumat, tuotavissa suoraan soittolista-sovellukseen
@@ -169,7 +176,7 @@ def run_chains(args):
     city = (args.city or "").strip()
     queries = []
     for b in brands:
-        queries.append((b, f"{b} tilitoimisto {city}".strip()))
+        queries.append((b, " ".join(p for p in (b, args.chain_term, city) if p)))
         queries.append((b, f"{b} {city}".strip()))
 
     cache_path = Path(args.cache)
@@ -209,7 +216,7 @@ def run_chains(args):
             pid = p.get("id", "")
             if b.lower() not in name.lower() or pid in seen:
                 continue
-            if any(w in name.lower() for w in CHAIN_SKIP_WORDS):  # esim. "Accountor Software"
+            if any(w.lower() in name.lower() for w in args.chain_skip):  # esim. "Accountor Software"
                 continue
             if city and city.lower() not in addr.lower():
                 continue
@@ -260,7 +267,14 @@ def main():
     ap.add_argument("--chains", nargs="*",
                     help="hae ketjujen toimistot kaupungista, esim. --chains tai --chains Talenom Azets")
     ap.add_argument("--chains-out", default="data/ketjut_rikastettu.csv")
-    ap.add_argument("--input", default="data/prh_pohja.csv")
+    ap.add_argument("--in", "--input", dest="input", default="data/prh_pohja.csv",
+                    help="syötetiedosto (oletus data/prh_pohja.csv)")
+    ap.add_argument("--generic", nargs="+", default=[], metavar="SANA",
+                    help="lisää yleissanoja nimivertailun GENERIC_WORDS-joukkoon (oletukset säilyvät)")
+    ap.add_argument("--chain-term", default="tilitoimisto",
+                    help="ketjuhaun toimialasana (oletus tilitoimisto, '' = ei sanaa)")
+    ap.add_argument("--chain-skip", nargs="+", default=CHAIN_SKIP_WORDS, metavar="SANA",
+                    help="ohita ketjun yksiköt, joiden nimessä on jokin näistä (oletus software ohjelmisto)")
     ap.add_argument("--out", default="data/prh_rikastettu.csv")
     ap.add_argument("--review", default="data/prh_tarkista.csv")
     ap.add_argument("--cache", default="data/places_cache.json")
@@ -271,6 +285,7 @@ def main():
     ap.add_argument("--max-queries", type=int, default=250, help="enintään N uutta hakua (oletus 250)")
     ap.add_argument("--dry-run", action="store_true", help="älä tee hakuja, näytä vain määrät")
     args = ap.parse_args()
+    GENERIC_WORDS.update(w.lower() for w in args.generic)
 
     if args.chains is not None:
         return run_chains(args)
